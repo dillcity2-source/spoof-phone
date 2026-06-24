@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""
+PhoneSpoof - A GitHub-style CLI tool for phone number manipulation
+Educational purposes only - Use responsibly and legally
+"""
+
+import click
+import json
+import os
+import sys
+from datetime import datetime
+from tabulate import tabulate
+from twilio.rest import Client
+import phonenumbers
+from phonenumbers import carrier, timezone, geocoder
+
+class PhoneSpoof:
+    def __init__(self):
+        self.config_file = os.path.expanduser("~/.phonespoof/config.json")
+        self.load_config()
+        
+    def load_config(self):
+        """Load configuration from file"""
+        if os.path.exists(self.config_file):
+            with open(self.config_file) as f:
+                self.config = json.load(f)
+        else:
+            self.config = {
+                "account_sid": "",
+                "auth_token": "",
+                "default_caller_id": "",
+                "history": []
+            }
+            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
+            self.save_config()
+    
+    def save_config(self):
+        """Save configuration to file"""
+        with open(self.config_file, 'w') as f:
+            json.dump(self.config, f, indent=2)
+    
+    def get_client(self):
+        """Get Twilio client"""
+        if not self.config["account_sid"] or not self.config["auth_token"]:
+            click.echo("❌ Please configure your Twilio credentials first:")
+            click.echo("   phonespoof config --set-credentials")
+            sys.exit(1)
+        return Client(self.config["account_sid"], self.config["auth_token"])
+
+@click.group()
+def cli():
+    """PhoneSpoof - Advanced phone number manipulation tool"""
+    pass
+
+@cli.command()
+@click.option('--set-credentials', is_flag=True, help='Set Twilio credentials')
+@click.option('--set-caller', help='Set default caller ID number')
+@click.option('--show', is_flag=True, help='Show current configuration')
+def config(set_credentials, set_caller, show):
+    """Configure PhoneSpoof settings"""
+    ps = PhoneSpoof()
+    
+    if set_credentials:
+        ps.config["account_sid"] = click.prompt("Enter Twilio Account SID", hide_input=False)
+        ps.config["auth_token"] = click.prompt("Enter Twilio Auth Token", hide_input=True)
+        ps.save_config()
+        click.echo("✅ Credentials saved successfully!")
+    
+    if set_caller:
+        # Validate phone number
+        try:
+            parsed = phonenumbers.parse(set_caller, None)
+            if not phonenumbers.is_valid_number(parsed):
+                click.echo("❌ Invalid phone number format")
+                return
+            ps.config["default_caller_id"] = set_caller
+            ps.save_config()
+            click.echo(f"✅ Default caller ID set to {set_caller}")
+        except:
+            click.echo("❌ Invalid phone number format")
+    
+    if show:
+        click.echo("\n📱 PhoneSpoof Configuration")
+        click.echo("-" * 40)
+        click.echo(f"Account SID: {ps.config['account_sid'][:10]}..." if ps.config['account_sid'] else "Not set")
+        click.echo(f"Auth Token: {'*' * 10}" if ps.config['auth_token'] else "Not set")
+        click.echo(f"Default Caller ID: {ps.config['default_caller_id'] or 'Not set'}")
+        click.echo(f"History Entries: {len(ps.config['history'])}")
+
+@cli.command()
+@click.argument('number')
+@click.option('--caller', help='Caller ID to display (spoofed number)')
+@click.option('--message', help='Message for SMS (if using SMS)')
+@click.option('--sms', is_flag=True, help='Send SMS instead of call')
+@click.option('--voice', default='woman', help='Voice for call (man/woman/alice)')
+def call(number, caller, message, sms, voice):
+    """Make a call or send SMS with spoofed caller ID"""
+    ps = PhoneSpoof()
+    
+    # Validate target number
+    try:
+        target = phonenumbers.parse(number, None)
+        if not phonenumbers.is_valid_number(target):
+            click.echo("❌ Invalid target phone number")
+            return
+        number = phonenumbers.format_number(target, phonenumbers.PhoneNumberFormat.E164)
+    except:
+        click.echo("❌ Invalid phone number format")
+        return
+    
+    # Get caller ID
+    caller_id = caller or ps.config.get("default_caller_id")
+    if not caller_id:
+        click.echo("❌ No caller ID specified. Use --caller or set default with 'config --set-caller'")
+        return
+    
+    try:
+        client = ps.get_client()
+        
+        if sms:
+            # Send SMS
+            if not message:
+                message = click.prompt("Enter your message")
+            
+            msg = client.messages.create(
+                body=message,
+                from_=caller_id,
+                to=number
+            )
+            click.echo(f"✅ SMS sent! SID: {msg.sid}")
+            ps.config["history"].append({
+                "type": "sms",
+                "to": number,
+                "from": caller_id,
+                "timestamp": datetime.now().isoformat(),
+                "status": "sent"
+            })
+        else:
+            # Make call
+            twiml = f'<Response><Say voice="{voice}">Hello, this is a test call from PhoneSpoof.</Say></Response>'
+            call = client.calls.create(
+                twiml=twiml,
+                from_=caller_id,
+                to=number
+            )
+            click.echo(f"✅ Call initiated! SID: {call.sid}")
+            ps.config["history"].append({
+                "type": "call",
+                "to": number,
+                "from": caller_id,
+                "timestamp": datetime.now().isoformat(),
+                "status": call.status
+            })
+        
+        ps.save_config()
+        
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+@cli.command()
+@click.argument('number')
+@click.option('--format', default='national', help='Format: national, international, e164')
+def lookup(number, format):
+    """Look up phone number information"""
+    try:
+        parsed = phonenumbers.parse(number, None)
+        if not phonenumbers.is_valid_number(parsed):
+            click.echo("❌ Invalid phone number")
+            return
+        
+        click.echo("\n📋 Phone Number Information")
+        click.echo("-" * 40)
+        click.echo(f"Country: {geocoder.description_for_number(parsed, 'en')}")
+        click.echo(f"Carrier: {carrier.name_for_number(parsed, 'en') or 'Unknown'}")
+        click.echo(f"Time zones: {', '.join(timezone.time_zones_for_number(parsed))}")
+        click.echo(f"Number type: {phonenumbers.number_type(parsed)}")
+        click.echo(f"Valid: {phonenumbers.is_valid_number(parsed)}")
+        
+        if format == 'national':
+            click.echo(f"Formatted (national): {phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.NATIONAL)}")
+        elif format == 'international':
+            click.echo(f"Formatted (intl): {phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)}")
+        else:
+            click.echo(f"Formatted (E164): {phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)}")
+            
+    except Exception as e:
+        click.echo(f"❌ Error: {str(e)}")
+
+@cli.command()
+@click.option('--limit', default=10, help='Number of history entries to show')
+def history(limit):
+    """Show call/SMS history"""
+    ps = PhoneSpoof()
+    
+    if not ps.config["history"]:
+        click.echo("No history found")
+        return
+    
+    history = ps.config["history"][-limit:][::-1]  # Show newest first
+    
+    table = []
+    for entry in history:
+        table.append([
+            entry["timestamp"][:19],
+            entry["type"].upper(),
+            entry["from"],
+            entry["to"],
+            entry["status"]
+        ])
+    
+    click.echo("\n📜 Recent Activity")
+    click.echo("-" * 80)
+    click.echo(tabulate(table, headers=["Time", "Type", "From", "To", "Status"], tablefmt="grid"))
+
+@cli.command()
+@click.option('--clear', is_flag=True, help='Clear all history')
+def clear(clear):
+    """Clear history or configuration"""
+    if clear:
+        if click.confirm("Are you sure you want to clear all history?"):
+            ps = PhoneSpoof()
+            ps.config["history"] = []
+            ps.save_config()
+            click.echo("✅ History cleared!")
+
+@cli.command()
+def version():
+    """Show version information"""
+    click.echo("PhoneSpoof v1.0.0")
+    click.echo("GitHub-style CLI for phone number manipulation")
+    click.echo("⚠️  For educational purposes only")
+
+if __name__ == "__main__":
+    cli()
